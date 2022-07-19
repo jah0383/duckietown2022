@@ -95,7 +95,9 @@ class VideoFilter(DTROS):
             "~debug/videoFilter/heading_debug/compressed", CompressedImage, queue_size=1, dt_topic_type=TopicType.DEBUG
         )
 
-
+        self.step_seven = rospy.Publisher(
+            "~debug/videoFilter/step_seven/compressed", CompressedImage, queue_size=1, dt_topic_type=TopicType.DEBUG
+        )
         self.step_six = rospy.Publisher(
             "~debug/videoFilter/step_six/compressed", CompressedImage, queue_size=1, dt_topic_type=TopicType.DEBUG
         )
@@ -154,8 +156,9 @@ class VideoFilter(DTROS):
         self.roi_pts = roipointdict[self.vehicle_name]
         
 
-        
-    #The main loop, takes the image from the camera and publishes commands to the wheels a
+    
+    #The main loop, takes the image from the camera and publishes commands to the wheels 
+    #This loop can be explained with this writeup we made https://docs.google.com/document/d/1WEe3QA1zJmwkpXnfjBYRxmivsU8whs6uaWPJeWYtbOA/edit?usp=sharing
     def image_cb(self, msg):
         global redLine
         try:
@@ -235,19 +238,40 @@ class VideoFilter(DTROS):
         out_msg.header = msg.header
         self.step_three.publish(out_msg)
 
-
+        img_hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
         #Converts to HSV image
         warped_imgHSV = cv2.cvtColor(warped_img, cv2.COLOR_BGR2HSV)
 
         #The white parts 
-        white_mask = cv2.inRange(warped_imgHSV, (0,0,170), (255,255 ,255))
+        sensitivity = 15
+        lower_white = np.array([0,0,255-sensitivity])
+        upper_white = np.array([255,sensitivity,255])
+        white_mask = cv2.inRange(warped_imgHSV, lower_white, upper_white)
 
         #The Yellow Part
-        yellow_mask = cv2.inRange(warped_imgHSV, (26, 155, 238), (49, 100, 93))
+        yellow_lower = np.array([20, 100, 100])
+        yellow_upper = np.array([30,255,255])
+
+        yellow_mask = cv2.inRange(img_hsv, yellow_lower, yellow_upper)
+        yellow_image = cv2.bitwise_and(img_hsv,img_hsv,mask=yellow_mask)
+        yellow_rgb = cv2.cvtColor(yellow_image, cv2.COLOR_HSV2RGB)
+        yellow_grayscale = cv2.cvtColor(yellow_rgb, cv2.COLOR_RGB2GRAY)
+
+        yellow_contours = cv2.findContours(yellow_grayscale, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE) [-2]
 
         #Both white and yellow combined 
         white_yellow_mask = cv2.bitwise_or(white_mask,yellow_mask)
+
+
+
+        #THe red masks, I don't know why theres 2
+        upper_rmask = cv2.inRange(warped_imgHSV, (160,100,20), (179,255,255))
+        lower_rmask = cv2.inRange(warped_imgHSV, (0,100,20), (10,255,255))
+        red_mask = upper_rmask + lower_rmask 
+
+        
+
 
         #These 4 steps remove noise
         #see https://docs.opencv.org/4.x/d9/d61/tutorial_py_morphological_ops.html
@@ -256,10 +280,6 @@ class VideoFilter(DTROS):
         kernel = np.ones((10,10),np.uint8)
         closing = cv2.morphologyEx(opening, cv2.MORPH_CLOSE, kernel)
         
-        #THe red masks, I don't know why theres 2
-        upper_rmask = cv2.inRange(warped_imgHSV, (160,100,20), (179,255,255))
-        lower_rmask = cv2.inRange(warped_imgHSV, (0,100,20), (10,255,255))
-        red_mask = upper_rmask + lower_rmask 
 
         #Final mask?
         whi_red_yel_mask = cv2.bitwise_or(closing,red_mask) # was white_yellow_mask or red_mask
@@ -269,10 +289,14 @@ class VideoFilter(DTROS):
         kernel = np.ones((10,10),np.uint8)
         closing = cv2.morphologyEx(opening, cv2.MORPH_CLOSE, kernel)
         contours = cv2.findContours(closing, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)[-2]
-        
+
+
+
 
         #"res" meaning "result"? unsure 
         res = cv2.bitwise_and(warped_img,warped_img,mask=whi_red_yel_mask)
+
+
         
 
         #This gets the contors for the image 
@@ -282,6 +306,7 @@ class VideoFilter(DTROS):
             cv2.rectangle(warped_img, (x,y),(x+w,y+h),(0,255,0),2)
             cv2.rectangle(res, (x,y),(x+w,y+h),(0,255,0),2)
             # print(x,y,x+w,y+h)
+
             if (y+h >= 0 and y+h <240):
                 redLine = 1
             if (y+h >=475 and redLine == 1):
@@ -294,6 +319,18 @@ class VideoFilter(DTROS):
                 time.sleep(3)
                 #quit()
 
+        if len(yellow_contours)>0:
+            yell_area = max(yellow_contours, key=cv2.contourArea)
+            (xpoint,ypoint),radius = cv2.minEnclosingCircle(yell_area)
+            cv2.circle(img, (int(xpoint),int(ypoint)), int(radius), (0,255,0),2)
+            rospy.loginfo(f"circle r:{int(radius)} and center:{int(xpoint)},{int(ypoint)}")
+            if(radius>50 and xpoint>100):
+                wheels_cmd_msg = WheelsCmdStamped()
+                wheels_cmd_msg.header.stamp = rospy.Time.now()
+                wheels_cmd_msg.vel_left = 0
+                wheels_cmd_msg.vel_right = 0
+                self.pub_wheels_cmd.publish(wheels_cmd_msg)
+
 
         out_msg4 = self.bridge.cv2_to_compressed_imgmsg(res)
         out_msg4.header = msg.header
@@ -304,25 +341,32 @@ class VideoFilter(DTROS):
         out_msg = self.bridge.cv2_to_compressed_imgmsg(warped_img)
         out_msg.header = msg.header
         # publish image
-        self.step_five.publish(out_msg)       
+        self.step_five.publish(out_msg) 
+
+        out_msg69 = self.bridge.cv2_to_compressed_imgmsg(img)
+        out_msg69.header = msg.header
+        # publish image
+        self.step_seven.publish(out_msg69)
+
+
         
-        #min_theta = 3.14/3,max_theta = (2*3.14)/3
+        #This is edge detection
         dstw = cv2.Canny(white_mask, 50, 200, None, 3)
-        dsty = cv2.Canny(yellow_mask, 50, 200, None, 3)
         
 
 
-
+        #This takes the edge detection lines and then turns them into a collection of lines we can then 
         wlines = cv2.HoughLines(dstw, 1, np.pi / 180, 50, 10, 0, 0,min_theta = -np.pi/3,  max_theta = np.pi/3)
-        ylines = cv2.HoughLines(dsty, 1, np.pi / 180, 50, 10, 0, 0,min_theta = -np.pi/3,  max_theta = np.pi/3)
-        white_yellow_mask = cv2.cvtColor(white_yellow_mask, cv2.COLOR_GRAY2BGR)
+        white_mask = cv2.cvtColor(white_mask, cv2.COLOR_GRAY2BGR)
 
 
-        out_msg2 = self.bridge.cv2_to_compressed_imgmsg(white_yellow_mask)
+        out_msg2 = self.bridge.cv2_to_compressed_imgmsg(white_mask)
         out_msg.header = msg.header
         # publish image
         self.step_six.publish(out_msg2)
         
+
+
         tot_avg_theta = 0
         num_at = 0
         tot_avg_rho = 0
@@ -330,7 +374,9 @@ class VideoFilter(DTROS):
         #white lines
         avg_theta = 0
         avg_rho = 0
-        # Draw the lines
+
+
+        # Draw the while lines
         if wlines is not None:
             for i in range(0, len(wlines)):
                 rho = wlines[i][0][0]
@@ -351,56 +397,37 @@ class VideoFilter(DTROS):
             y0 = b * avg_rho
             pt1 = (int(x0 + 1000*(-b)), int(y0 + 1000*(a)))
             pt2 = (int(x0 - 1000*(-b)), int(y0 - 1000*(a)))
-            cv2.line(white_yellow_mask, pt1, pt2, (int(255*((math.cos(avg_theta)+1)/2)),0,255), 3, cv2.LINE_AA)   
+            cv2.line(white_mask, pt1, pt2, (int(255*((math.cos(avg_theta)+1)/2)),0,255), 3, cv2.LINE_AA)   
+
+
+
+            
+            
+
+
+        #Willl be completly honest, I have zero clue how it stops at stop signs, like, it looks for a red line somewhere, but idk where 
         
-        #yellow lines
-        avg_theta = 0
-        avg_rho = 0
-        # Draw the lines
-        if ylines is not None:
-            for i in range(0, len(ylines)):
-                rho = ylines[i][0][0]
-                theta = ylines[i][0][1]
-                #theta = math.radians(math.degrees(theta) % 180)
-                avg_rho += rho
-                avg_theta += theta
-            avg_theta /= (len(ylines))
-            avg_rho /= (len(ylines))
-            # avg_theta = avg_theta * (3/4)
-            tot_avg_theta += avg_theta
-            num_at +=1
-            tot_avg_rho += avg_rho
-            num_ar +=1
-            
-            a = math.cos(avg_theta)
-            b = math.sin(avg_theta)
-            x0 = a * avg_rho
-            y0 = b * avg_rho
-            pt1 = (int(x0 + 1000*(-b)), int(y0 + 1000*(a)))
-            pt2 = (int(x0 - 1000*(-b)), int(y0 - 1000*(a)))
-            cv2.line(white_yellow_mask, pt1, pt2, (int(255*((math.cos(avg_theta)+1)/2)),0,255), 3, cv2.LINE_AA)
-        if(num_at !=0):
-            tot_avg_theta /= num_at
-            
-            
-        # makes green line**
-        
+
         self.motor_command(tot_avg_theta)
-        cv2.putText(white_yellow_mask,"{} average theta {}".format(2,tot_avg_theta),(30,30),0,1,(0,255,255))
+
+
+        cv2.putText(white_mask,"{} average theta {}".format(2,tot_avg_theta),(30,30),0,1,(0,255,255))
         a = math.cos(tot_avg_theta)
         b = math.sin(tot_avg_theta)
         x0 = a * tot_avg_rho
         y0 = b * tot_avg_rho
         pt1 = (int(x0 + 20*(-b)), int(y0 + 20*(a)))
         pt2 = (int(x0 - 20*(-b)), int(y0 - 20*(a)))
-        cv2.line(white_yellow_mask, (640//2,480//2), pt2, (0,255,0), 3, cv2.LINE_AA)  
+        cv2.line(white_mask, (640//2,480//2), pt2, (0,255,0), 3, cv2.LINE_AA)  
         
         gain = .2
         shift = np.pi/2
         k1 = -np.pi/4
         k2 = (5*np.pi)/4       
-        cv2.putText(white_yellow_mask,"\nleft: {:.2f} \nright:{:.2f}".format(gain*math.cos(tot_avg_theta+shift+k2),gain*math.cos(tot_avg_theta+shift+k1)),(30,70),0,1,(0,255,255))
-        out_msg = self.bridge.cv2_to_compressed_imgmsg(white_yellow_mask)
+        cv2.putText(white_mask,"\nleft: {:.2f} \nright:{:.2f}".format(gain*math.cos(tot_avg_theta+shift+k2),gain*math.cos(tot_avg_theta+shift+k1)),(30,70),0,1,(0,255,255))
+        
+        
+        out_msg = self.bridge.cv2_to_compressed_imgmsg(white_mask)
         out_msg.header = msg.header
         # publish image
         self.heading_debug.publish(out_msg)
@@ -412,12 +439,17 @@ class VideoFilter(DTROS):
         wheels_cmd_msg = WheelsCmdStamped()
         wheels_cmd_msg.header.stamp = rospy.Time.now()
         gain = .2
-        shift = np.pi/2
-        k1 = -np.pi/4
-        k2 = (5*np.pi)/4
-        
-        wheels_cmd_msg.vel_left = gain*math.cos(theta+shift+k2)
-        wheels_cmd_msg.vel_right = gain*math.cos(theta+shift+k1)
+        right = 0.15
+        left = 0.15
+        if theta < -0.08:
+            right+=0.1
+            left-=0.1
+        if theta > 0.08:
+            right-=0.1
+            left+=0.1
+
+        wheels_cmd_msg.vel_left = left
+        wheels_cmd_msg.vel_right = right
         rospy.loginfo(f"going L{wheels_cmd_msg.vel_left} and R{wheels_cmd_msg.vel_right}")
        
         self.pub_wheels_cmd.publish(wheels_cmd_msg)

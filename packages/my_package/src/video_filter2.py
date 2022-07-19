@@ -26,6 +26,7 @@ high_S = 255
 high_V = 255
 
 
+
 redLine = 0
 
 #These define a region of interest(ROI) in front of the car, these define a trapezoid which then transforms into the screen
@@ -79,7 +80,10 @@ endpointdict = {
 
 #The main class 
 class VideoFilter(DTROS):
+
     def __init__(self, node_name):
+        self.duckie_counter = 0
+        self.duckie_window = [0 for x in range(0,10)]
         super(VideoFilter,self).__init__(node_name=node_name,node_type=NodeType.PERCEPTION)
         self.bridge = CvBridge()
         self.vehicle_name = os.environ.get("VEHICLE_NAME")
@@ -95,7 +99,9 @@ class VideoFilter(DTROS):
             "~debug/videoFilter/heading_debug/compressed", CompressedImage, queue_size=1, dt_topic_type=TopicType.DEBUG
         )
 
-
+        self.step_seven = rospy.Publisher(
+            "~debug/videoFilter/step_seven/compressed", CompressedImage, queue_size=1, dt_topic_type=TopicType.DEBUG
+        )
         self.step_six = rospy.Publisher(
             "~debug/videoFilter/step_six/compressed", CompressedImage, queue_size=1, dt_topic_type=TopicType.DEBUG
         )
@@ -152,10 +158,94 @@ class VideoFilter(DTROS):
                 self.D_Matrix = np.array([yaml_config["distortion_coefficients"]["data"]])
         
         self.roi_pts = roipointdict[self.vehicle_name]
-        
 
-        
-    #The main loop, takes the image from the camera and publishes commands to the wheels a
+
+    def detect_duckie(self,img):
+        #set values for yellow mask
+        img_hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        yellow_lower = np.array([15, 100, 100])
+        yellow_upper = np.array([35, 255, 255])
+        yellow_mask = cv2.inRange(img_hsv, yellow_lower, yellow_upper)
+
+        #extract yellow part of image
+        yellow_image = cv2.bitwise_and(img_hsv,img_hsv,mask=yellow_mask)
+
+        #filter the image
+        kernel = np.ones((5,5),np.uint8)
+        opening = cv2.morphologyEx(yellow_image, cv2.MORPH_OPEN, kernel) # change to white mask and yellow mask
+        kernel = np.ones((10,10),np.uint8)
+        closing = cv2.morphologyEx(opening, cv2.MORPH_CLOSE, kernel)
+
+
+        dsty = cv2.Canny(closing, 50, 200, None, 3)
+
+        #find and draw contours on original image
+        contours,hierarchy = cv2.findContours(dsty,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(img,contours,-1,(0,255,0),2)
+        if len(contours)>0:
+            for i in contours:
+                perimeter = cv2.arcLength(i,True)
+                approximation = cv2.approxPolyDP(i,0.04*perimeter, True)
+                if len(approximation)==4:
+                    (x,y,w,h) = cv2.boundingRect(approximation)
+                    cv2.rectangle(yellow_image,(int(x),int(y)),(int(x+w),int(y+h)),(0,0,0),-1)
+
+                    yellow_area = max(contours, key=cv2.contourArea)
+                    (x2,y2),radius = cv2.minEnclosingCircle(yellow_area)
+                    cv2.circle(yellow_image,(int(x2),int(y2)),int(radius),(0,0,0),-1)
+
+
+        kernel = np.ones((5,5),np.uint8)
+        opening = cv2.morphologyEx(yellow_image, cv2.MORPH_OPEN, kernel) # change to white mask and yellow mask
+        kernel = np.ones((10,10),np.uint8)
+        closing = cv2.morphologyEx(opening, cv2.MORPH_CLOSE, kernel)
+
+        dsty2 = cv2.Canny(closing, 50, 200, None, 3)
+
+        lines = cv2.HoughLinesP(dsty2,1,np.pi / 180, 80,30,10,100)
+        if lines is not None:
+            for line in lines:
+                for x1,y1,x2,y2 in line:
+                    centerx = int((int(x2)+int(x1))/2)
+                    centery = int((int(y1)+int(y2))/2)
+                    line_radius = 100
+                    cv2.circle(yellow_image, (centerx,centery), line_radius, (0,0,0), -1)
+
+        kernel = np.ones((5,5),np.uint8)
+        opening = cv2.morphologyEx(yellow_image, cv2.MORPH_OPEN, kernel) # change to white mask and yellow mask
+        kernel = np.ones((10,10),np.uint8)
+        closing = cv2.morphologyEx(opening, cv2.MORPH_CLOSE, kernel)
+
+        dsty3 = cv2.Canny(closing, 50, 200, None, 3)
+
+        lines = cv2.HoughLinesP(dsty3,1,np.pi / 180, 80,30,10,100)
+        if lines is not None:
+            (x1,y1,x2,y2) = lines[0,0]
+            cv2.rectangle(yellow_image, (x1,y1), (x1+100,y1+100), (0,0,0), -1)
+            cv2.rectangle(yellow_image, (x2,y2), (x2+100,y2+100), (0,0,0), -1)
+
+
+        #reprocess the image
+        kernel = np.ones((5,5),np.uint8)
+        opening = cv2.morphologyEx(yellow_image, cv2.MORPH_OPEN, kernel) # change to white mask and yellow mask
+        kernel = np.ones((10,10),np.uint8)
+        closing = cv2.morphologyEx(opening, cv2.MORPH_CLOSE, kernel)
+        dsty4 = cv2.Canny(closing, 50, 200, None, 3)
+        contours2,hierarchy = cv2.findContours(dsty4,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE)
+        for i in contours2:
+            perim = cv2.arcLength(i,True)
+            if perim>500:
+                yellow_area = max(contours2, key=cv2.contourArea)
+                (x2,y2),radius = cv2.minEnclosingCircle(yellow_area)
+                cv2.circle(img,(int(x2),int(y2)),int(radius),(255,0,0),2)
+                #print(duckie_counter)
+                #print(perim)
+                if radius>60:
+                    return True
+
+    
+    #The main loop, takes the image from the camera and publishes commands to the wheels 
+    #This loop can be explained with this writeup we made https://docs.google.com/document/d/1WEe3QA1zJmwkpXnfjBYRxmivsU8whs6uaWPJeWYtbOA/edit?usp=sharing
     def image_cb(self, msg):
         global redLine
         try:
@@ -294,6 +384,25 @@ class VideoFilter(DTROS):
                 time.sleep(3)
                 #quit()
 
+        ducc = self.detect_duckie(warped_img)
+        if ducc:
+            rospy.loginfo(f"Sees a duck!")  
+            self.duckie_window[self.duckie_counter%8] = 1
+            self.duckie_counter += 1
+        else:
+            rospy.loginfo(f"Does not see a duck!")
+            self.duckie_window[self.duckie_counter%8] = 0
+            self.duckie_counter += 1  
+        rospy.loginfo(f"Duckie window: {self.duckie_window}")         
+        if (self.duckie_window.count(1))>=3:
+            rospy.loginfo(f"stopping for duckie")  
+            wheels_cmd_msg = WheelsCmdStamped()
+            wheels_cmd_msg.header.stamp = rospy.Time.now()
+            wheels_cmd_msg.vel_left = 0
+            wheels_cmd_msg.vel_right = 0
+            self.pub_wheels_cmd.publish(wheels_cmd_msg)
+            time.sleep(5)
+            return
 
         out_msg4 = self.bridge.cv2_to_compressed_imgmsg(res)
         out_msg4.header = msg.header
@@ -382,7 +491,6 @@ class VideoFilter(DTROS):
         if(num_at !=0):
             tot_avg_theta /= num_at
             
-            
         # makes green line**
         
         self.motor_command(tot_avg_theta)
@@ -395,7 +503,7 @@ class VideoFilter(DTROS):
         pt2 = (int(x0 - 20*(-b)), int(y0 - 20*(a)))
         cv2.line(white_yellow_mask, (640//2,480//2), pt2, (0,255,0), 3, cv2.LINE_AA)  
         
-        gain = .2
+        gain = .25
         shift = np.pi/2
         k1 = -np.pi/4
         k2 = (5*np.pi)/4       
@@ -411,17 +519,17 @@ class VideoFilter(DTROS):
     def motor_command(self,theta):
         wheels_cmd_msg = WheelsCmdStamped()
         wheels_cmd_msg.header.stamp = rospy.Time.now()
-        gain = .2
+        gain = 0.3
         shift = np.pi/2
         k1 = -np.pi/4
         k2 = (5*np.pi)/4
+        theta = theta*1.25
         
-        wheels_cmd_msg.vel_left = gain*math.cos(theta+shift+k2)
-        wheels_cmd_msg.vel_right = gain*math.cos(theta+shift+k1)
+        wheels_cmd_msg.vel_left = 0#gain*math.cos(theta+shift+k2)
+        wheels_cmd_msg.vel_right = 0#gain*math.cos(theta+shift+k1)+0.05
         rospy.loginfo(f"going L{wheels_cmd_msg.vel_left} and R{wheels_cmd_msg.vel_right}")
        
         self.pub_wheels_cmd.publish(wheels_cmd_msg)
-        
         
     def on_shutdown(self):
 
